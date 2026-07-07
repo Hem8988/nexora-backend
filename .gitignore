@@ -1,0 +1,5 @@
+node_modules/
+*.db
+*.log
+.env
+query_users.js
