@@ -244,6 +244,78 @@ export async function initDatabase() {
   await seed('min_withdrawal_usd', '5');
   await seed('global_freeze', '0');
 
+  // Create task configurations table
+  await run(`
+    CREATE TABLE IF NOT EXISTS task_configurations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tier_id INTEGER UNIQUE NOT NULL,
+      display_name TEXT NOT NULL,
+      payout REAL NOT NULL,
+      animation_delay INTEGER NOT NULL,
+      graphic_asset TEXT NOT NULL
+    )
+  `);
+
+  // Create labour logs table
+  await run(`
+    CREATE TABLE IF NOT EXISTS labour_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      phone TEXT NOT NULL,
+      tier_name TEXT NOT NULL,
+      task_instance TEXT NOT NULL,
+      status TEXT NOT NULL,
+      timestamp TEXT NOT NULL
+    )
+  `);
+
+  // Seed default configurations
+  const defaultTaskConfigs = [
+    { tier_id: 0, display_name: "Match Eco-Grid Order", payout: 21.33, animation_delay: 5, graphic_asset: "eco_grid_order.glb" },
+    { tier_id: 1, display_name: "Verify Wind Turbine Dispatch", payout: 23.75, animation_delay: 6, graphic_asset: "wind_turbine.glb" },
+    { tier_id: 2, display_name: "Validate Hydro Flow Metrics", payout: 26.40, animation_delay: 7, graphic_asset: "hydro_flow.glb" },
+    { tier_id: 3, display_name: "Inspect Solar Panel Array", payout: 29.85, animation_delay: 6, graphic_asset: "solar_panel_array.glb" },
+    { tier_id: 4, display_name: "Check Battery Storage Unit", payout: 33.20, animation_delay: 8, graphic_asset: "battery_storage.glb" }
+  ];
+
+  for (const config of defaultTaskConfigs) {
+    await run(`
+      INSERT OR IGNORE INTO task_configurations (tier_id, display_name, payout, animation_delay, graphic_asset)
+      VALUES (?, ?, ?, ?, ?)
+    `, [config.tier_id, config.display_name, config.payout, config.animation_delay, config.graphic_asset]);
+  }
+
+  // Seed labour logs (6 items shown in screenshot)
+  const defaultLabourLogs = [
+    { phone: "+1 (555) 123-4567", tier_name: "Tier 4: Agro-Solar Pump", task_instance: "Task #2 of 5", status: "In-Progress / Unchecked", timestamp: "2025-05-10 14:23:45.123456" },
+    { phone: "+1 (555) 987-6543", tier_name: "Tier 3: Wind Energy Node", task_instance: "Task #5 of 5", status: "Successfully Processed", timestamp: "2025-05-10 14:23:44.654321" },
+    { phone: "+1 (555) 222-3333", tier_name: "Tier 2: Hydro Power Unit", task_instance: "Task #1 of 5", status: "In-Progress / Unchecked", timestamp: "2025-05-10 14:23:43.987654" },
+    { phone: "+1 (555) 444-5555", tier_name: "Tier 5: Biofuel Processor", task_instance: "Task #3 of 5", status: "Successfully Processed", timestamp: "2025-05-10 14:23:43.456789" },
+    { phone: "+1 (555) 666-7777", tier_name: "Tier 1: Smart Grid Monitor", task_instance: "Task #4 of 5", status: "In-Progress / Unchecked", timestamp: "2025-05-10 14:23:43.123987" },
+    { phone: "+1 (555) 888-9999", tier_name: "Tier 0: System Onboarding", task_instance: "Task #1 of 5", status: "Successfully Processed", timestamp: "2025-05-10 14:23:42.789654" }
+  ];
+
+  for (const log of defaultLabourLogs) {
+    const logExists = await get(`
+      SELECT id FROM labour_logs 
+      WHERE phone = ? AND tier_name = ? AND task_instance = ? AND timestamp = ?
+    `, [log.phone, log.tier_name, log.task_instance, log.timestamp]);
+    if (!logExists) {
+      await run(`
+        INSERT INTO labour_logs (phone, tier_name, task_instance, status, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `, [log.phone, log.tier_name, log.task_instance, log.status, log.timestamp]);
+    }
+
+    const userExists = await get("SELECT id FROM users WHERE phone = ?", [log.phone]);
+    if (!userExists) {
+      const dummyRefCode = "REF-" + log.phone.replace(/\D/g, '');
+      await run(`
+        INSERT INTO users (phone, password_hash, country_code, currency, total_balance, deposit_balance, commission_balance, referral_code, status, created_ip)
+        VALUES (?, 'DUMMY_HASH', '+1', 'USD', 1283.45, 100.0, 50.0, ?, 'active', '127.0.0.1')
+      `, [log.phone, dummyRefCode]);
+    }
+  }
+
   console.log("Database initialized and default settings verified.");
 }
 

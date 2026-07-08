@@ -1388,4 +1388,97 @@ router.post('/admin/task-submissions/verify', authenticateAdmin, async (req, res
   }
 });
 
+// Get task configurations
+router.get('/admin/task-configurations', authenticateAdmin, async (req, res) => {
+  try {
+    const configs = await db.all("SELECT * FROM task_configurations ORDER BY tier_id ASC");
+    res.json(configs);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch task configurations." });
+  }
+});
+
+// Save or update task configuration
+router.post('/admin/task-configurations/save', authenticateAdmin, async (req, res) => {
+  const { id, tier_id, display_name, payout, animation_delay, graphic_asset } = req.body;
+  
+  if (tier_id === undefined || !display_name || payout === undefined || animation_delay === undefined || !graphic_asset) {
+    return res.status(400).json({ error: "All fields are required." });
+  }
+
+  try {
+    if (id) {
+      await db.run(
+        `UPDATE task_configurations 
+         SET tier_id = ?, display_name = ?, payout = ?, animation_delay = ?, graphic_asset = ? 
+         WHERE id = ?`,
+        [tier_id, display_name, parseFloat(payout), parseInt(animation_delay), graphic_asset, id]
+      );
+      res.json({ message: "Task configuration updated successfully." });
+    } else {
+      await db.run(
+        `INSERT INTO task_configurations (tier_id, display_name, payout, animation_delay, graphic_asset) 
+         VALUES (?, ?, ?, ?, ?)`,
+        [tier_id, display_name, parseFloat(payout), parseInt(animation_delay), graphic_asset]
+      );
+      res.json({ message: "Task configuration created successfully." });
+    }
+  } catch (error) {
+    res.status(500).json({ error: "Failed to save task configuration: " + error.message });
+  }
+});
+
+// Delete task configuration
+router.delete('/admin/task-configurations/delete/:id', authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await db.run("DELETE FROM task_configurations WHERE id = ?", [id]);
+    res.json({ message: "Task configuration deleted successfully." });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to delete task configuration." });
+  }
+});
+
+// Get labour logs with user freeze status
+router.get('/admin/labour-logs', authenticateAdmin, async (req, res) => {
+  try {
+    const logs = await db.all(`
+      SELECT l.*, u.status as user_status 
+      FROM labour_logs l
+      LEFT JOIN users u ON l.phone = u.phone
+      ORDER BY l.id ASC
+    `);
+    res.json(logs);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch labour logs." });
+  }
+});
+
+// Reset labour log execution status to In-Progress / Unchecked
+router.post('/admin/labour-logs/reset', authenticateAdmin, async (req, res) => {
+  const { logId } = req.body;
+  try {
+    await db.run("UPDATE labour_logs SET status = 'In-Progress / Unchecked' WHERE id = ?", [logId]);
+    res.json({ message: "Labour log reset successfully." });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to reset labour log." });
+  }
+});
+
+// Toggle user freeze status via labour logs phone number
+router.post('/admin/labour-logs/toggle-freeze', authenticateAdmin, async (req, res) => {
+  const { phone } = req.body;
+  try {
+    const user = await db.get("SELECT status FROM users WHERE phone = ?", [phone]);
+    if (!user) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    const nextStatus = user.status === 'frozen' ? 'active' : 'frozen';
+    await db.run("UPDATE users SET status = ? WHERE phone = ?", [nextStatus, phone]);
+    res.json({ message: `User status changed to ${nextStatus}.`, status: nextStatus });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to toggle user freeze status: " + error.message });
+  }
+});
+
 export default router;
