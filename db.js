@@ -162,6 +162,8 @@ export async function initDatabase() {
   await addColumn("claimed_milestones TEXT DEFAULT ''");
   await addColumn("milestone_recruitment_claimed INTEGER DEFAULT 0");
   await addColumn("avatar TEXT");
+  await addColumn("all_tasks_count INTEGER DEFAULT 0");
+  await addColumn("remaining_tasks_count INTEGER DEFAULT 0");
 
   // Create dynamic vault_locks table
   await run(`
@@ -186,6 +188,32 @@ export async function initDatabase() {
       task_name TEXT NOT NULL,
       proof_image TEXT,
       status TEXT DEFAULT 'pending',
+      reward REAL NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+  `);
+
+  // Create incomplete tasks relational array table
+  await run(`
+    CREATE TABLE IF NOT EXISTS incomplete_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      contract_id INTEGER NOT NULL,
+      tier_name TEXT NOT NULL,
+      reward REAL NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+  `);
+
+  // Create completed tasks log repository table
+  await run(`
+    CREATE TABLE IF NOT EXISTS completed_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      contract_id INTEGER NOT NULL,
+      tier_name TEXT NOT NULL,
       reward REAL NOT NULL,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(user_id) REFERENCES users(id)

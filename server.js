@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import { initDatabase, run, get } from './db.js';
-import apiRouter from './routes.js';
+import apiRouter, { runGlobalMidnightReset } from './routes.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -31,10 +31,31 @@ async function startServer() {
     // Start background activity simulation to feed the Telegram channel with mock actions
     startTelegramSocialSim();
 
+    // Schedule midnight task reset cron
+    scheduleMidnightCron();
+
   } catch (error) {
     console.error("Failed to start backend database:", error);
     process.exit(1);
   }
+}
+
+function scheduleMidnightCron() {
+  const now = new Date();
+  const nextMidnight = new Date(now);
+  nextMidnight.setHours(24, 0, 0, 0); // 00:00 next day
+
+  const msToMidnight = nextMidnight.getTime() - now.getTime();
+  console.log(`[CRON] Scheduled global daily tasks reset. Next run in ${Math.round(msToMidnight / 1000 / 60)} minutes.`);
+
+  setTimeout(async () => {
+    try {
+      await runGlobalMidnightReset();
+    } catch (e) {
+      console.error("[CRON ERROR] Global daily task reset failed:", e);
+    }
+    scheduleMidnightCron(); // Reschedule
+  }, msToMidnight);
 }
 
 // Background simulator that spawns random user activity mock alerts to simulate high active user volume (DAU)

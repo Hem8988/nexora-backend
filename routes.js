@@ -6,6 +6,61 @@ import db from './db.js';
 const router = express.Router();
 const JWT_SECRET = 'nexora_jwt_secret_key_2026';
 
+export function getTaskLimit(tierName) {
+  if (tierName === 'Gold Refinery Reserve' || tierName === 'Gold Refining Facility') return 10;
+  if (tierName === 'Green Data Center') return 9;
+  if (tierName === 'Biomass Power Plant' || tierName === 'Biomass Energy Plant') return 8;
+  if (tierName === 'Industrial Hydro-Plant') return 7;
+  if (tierName === 'Wind Farm Asset' || tierName === 'Wind Turbine Project') return 6;
+  if (tierName === 'Agro-Solar Pump') return 5;
+  if (tierName === 'Solar Community Hub' || tierName === 'Lithium Battery Refinery') return 4;
+  if (tierName === 'Smart Home Grid') return 3;
+  if (tierName === 'Eco-Mini Grid' || tierName === 'Solar Power Grid') return 2;
+  return 1; // Free Starter Pack or None
+}
+
+export async function resetDailyTasksForUser(userId) {
+  // Clear existing tasks
+  await db.run("DELETE FROM completed_tasks WHERE user_id = ?", [userId]);
+  await db.run("DELETE FROM incomplete_tasks WHERE user_id = ?", [userId]);
+
+  // Find all active contracts
+  const contracts = await db.all("SELECT * FROM contracts WHERE user_id = ? AND status = 'active'", [userId]);
+
+  // Evaluate the user's highest unlocked investment package
+  let highestTier = 'Free Starter Pack';
+  let highestPrice = -1;
+  for (const c of contracts) {
+    if (c.price > highestPrice) {
+      highestPrice = c.price;
+      highestTier = c.tier_name;
+    }
+  }
+
+  // Calculate task limit
+  const taskLimit = getTaskLimit(highestTier);
+
+  // Reload counters
+  await db.run("UPDATE users SET all_tasks_count = ?, remaining_tasks_count = ? WHERE id = ?", [taskLimit, taskLimit, userId]);
+
+  // Calculate rewards
+  let totalDailyEarning = 0;
+  for (const c of contracts) {
+    totalDailyEarning += Math.round((c.price * c.daily_roi) * 100) / 100;
+  }
+
+  const singleTaskReward = taskLimit > 0 ? (totalDailyEarning / taskLimit) : 0;
+
+  for (let i = 0; i < taskLimit; i++) {
+    const assocContract = contracts[i % contracts.length] || { id: 0, tier_name: 'Free Starter Pack' };
+    await db.run(
+      `INSERT INTO incomplete_tasks (user_id, contract_id, tier_name, reward)
+       VALUES (?, ?, ?, ?)`,
+      [userId, assocContract.id, assocContract.tier_name, singleTaskReward]
+    );
+  }
+}
+
 // Middleware to verify JWT Token
 export function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -102,11 +157,26 @@ router.post('/auth/signup', async (req, res) => {
     const suffix = phone.slice(-4);
     const referralCode = `NEX-${suffix}-${Math.floor(100 + Math.random() * 900)}`;
 
-    // 6. Insert User with Triple-Wallet balance attributes
-    await db.run(
-      `INSERT INTO users (phone, password_hash, country_code, currency, total_balance, deposit_balance, commission_balance, referral_code, referred_by, created_ip) 
-       VALUES (?, ?, ?, ?, 0.0, 0.0, 0.0, ?, ?, ?)`,
+    // 6. Insert User with Triple-Wallet balance attributes and default task limits
+    const userResult = await db.run(
+      `INSERT INTO users (phone, password_hash, country_code, currency, total_balance, deposit_balance, commission_balance, referral_code, referred_by, created_ip, all_tasks_count, remaining_tasks_count) 
+       VALUES (?, ?, ?, ?, 0.0, 0.0, 0.0, ?, ?, ?, 1, 1)`,
       [phone, passwordHash, countryCode, currency, referralCode, referredById, ip]
+    );
+    const userId = userResult.id;
+
+    // Create free starter contract by default
+    const contractResult = await db.run(
+      `INSERT INTO contracts (user_id, tier_name, price, daily_roi, duration_days, last_claimed_at) 
+       VALUES (?, 'Free Starter Pack', 0.0, 0.0, 180, NULL)`,
+      [userId]
+    );
+
+    // Create first daily task entry in incomplete_tasks array
+    await db.run(
+      `INSERT INTO incomplete_tasks (user_id, contract_id, tier_name, reward)
+       VALUES (?, ?, 'Free Starter Pack', 0.0)`,
+      [userId, contractResult.id]
     );
 
     res.status(201).json({ message: "Registration successful. Please login." });
@@ -183,7 +253,7 @@ router.post('/auth/admin-login', async (req, res) => {
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
     const user = await db.get(
-      "SELECT id, phone, currency, total_balance, vault_balance, vault_locked_until, status, referral_code, referred_by, deposit_balance, commission_balance, level1_pending_comm, level2_pending_comm, level3_pending_comm, claimed_milestones, milestone_recruitment_claimed, avatar, email, full_name FROM users WHERE id = ?",
+      "SELECT id, phone, currency, total_balance, vault_balance, vault_locked_until, status, referral_code, referred_by, deposit_balance, commission_balance, level1_pending_comm, level2_pending_comm, level3_pending_comm, claimed_milestones, milestone_recruitment_claimed, avatar, email, full_name, all_tasks_count, remaining_tasks_count FROM users WHERE id = ?",
       [req.user.id]
     );
 
@@ -262,6 +332,8 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
       avatar: user.avatar || null,
       email: user.email || '',
       full_name: user.full_name || '',
+      all_tasks_count: user.all_tasks_count || 0,
+      remaining_tasks_count: user.remaining_tasks_count || 0,
       stats: {
         activeContracts: contractsCount.activeCount || 0,
         totalInvested: contractsCount.activeInvested || 0,
@@ -443,6 +515,8 @@ router.post('/invest/activate', authenticateToken, async (req, res) => {
       return { contractId, price: selectedTier.price, tierName: selectedTier.name, maturityDate: maturityDate.toISOString() };
     });
 
+    await resetDailyTasksForUser(userId);
+
     res.json({
       message: `${purchaseResult.tierName} contract leased successfully.`,
       contract: purchaseResult
@@ -464,6 +538,83 @@ router.get('/invest/contracts', authenticateToken, async (req, res) => {
     res.json(contracts);
   } catch (error) {
     res.status(500).json({ error: "Failed to load contracts." });
+  }
+});
+
+// GET /api/tasks (returns incomplete and completed tasks)
+router.get('/tasks', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  try {
+    const incomplete = await db.all("SELECT * FROM incomplete_tasks WHERE user_id = ? ORDER BY id ASC", [userId]);
+    const completed = await db.all("SELECT * FROM completed_tasks WHERE user_id = ? ORDER BY id DESC", [userId]);
+    res.json({ incomplete, completed });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to load tasks: " + error.message });
+  }
+});
+
+// POST /api/tasks/run (runs task, completes transaction, updates balances)
+router.post('/tasks/run', authenticateToken, async (req, res) => {
+  const { taskId } = req.body;
+  const userId = req.user.id;
+
+  if (!taskId) return res.status(400).json({ error: "Task ID is required." });
+
+  try {
+    const result = await db.runTransaction(async () => {
+      // 1. Fetch incomplete task
+      const task = await db.get("SELECT * FROM incomplete_tasks WHERE id = ? AND user_id = ?", [taskId, userId]);
+      if (!task) throw new Error("Task not found or already completed.");
+
+      // 2. Fetch user profile
+      const user = await db.get("SELECT * FROM users WHERE id = ?", [userId]);
+      if (!user) throw new Error("User not found.");
+
+      // 3. Move task to completed_tasks
+      await db.run("DELETE FROM incomplete_tasks WHERE id = ?", [taskId]);
+      await db.run(
+        `INSERT INTO completed_tasks (id, user_id, contract_id, tier_name, reward, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [task.id, userId, task.contract_id, task.tier_name, task.reward, task.created_at]
+      );
+
+      // 4. Update user balance counters
+      const nextRemaining = Math.max(0, user.remaining_tasks_count - 1);
+      await db.run(
+        `UPDATE users 
+         SET remaining_tasks_count = ?, 
+             commission_balance = commission_balance + ?, 
+             total_balance = total_balance + ? 
+         WHERE id = ?`,
+        [nextRemaining, task.reward, task.reward, userId]
+      );
+
+      // 5. Record transaction log
+      await db.run(
+        `INSERT INTO transactions (user_id, type, amount, currency, status, details)
+         VALUES (?, 'task_reward', ?, 'USD', 'approved', ?)`,
+        [userId, task.reward, `Completed daily telemetry validation task for ${task.tier_name}`]
+      );
+
+      // 6. Record log in labour_logs for live monitoring ledger
+      const stepIndex = user.all_tasks_count - nextRemaining;
+      await db.run(
+        `INSERT INTO labour_logs (phone, tier_name, task_instance, status, timestamp)
+         VALUES (?, ?, ?, 'Successfully Processed', ?)`,
+        [user.phone, task.tier_name, `Task #${stepIndex} of ${user.all_tasks_count}`, new Date().toISOString()]
+      );
+
+      return { reward: task.reward, remaining: nextRemaining };
+    });
+
+    res.json({
+      message: "Telemetry synchronization validated successfully! Payout credited to your commission wallet.",
+      reward: result.reward,
+      remaining: result.remaining
+    });
+  } catch (error) {
+    console.error("Task run error:", error.message);
+    res.status(400).json({ error: error.message });
   }
 });
 
@@ -1507,6 +1658,52 @@ router.post('/admin/labour-logs/reset', authenticateAdmin, async (req, res) => {
   }
 });
 
+export async function runGlobalMidnightReset() {
+  console.log("[CRON] Running Global Midnight Reset Sequence...");
+  try {
+    const users = await db.all("SELECT id FROM users WHERE status = 'active'");
+    for (const u of users) {
+      await resetDailyTasksForUser(u.id);
+    }
+    console.log(`[CRON] Midnight reset completed successfully for ${users.length} users.`);
+  } catch (error) {
+    console.error("[CRON] Midnight reset sequence error:", error);
+  }
+}
+
+// FORCE MANUALLY RESET GLOBAL DAILY TASKS
+router.post('/admin/tasks/global-reset', authenticateAdmin, async (req, res) => {
+  try {
+    await runGlobalMidnightReset();
+    res.json({ message: "Global daily tasks manual reset executed successfully across all user accounts." });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to force global daily tasks reset: " + error.message });
+  }
+});
+
+// Force Reset Counters for a specific user ID or Phone
+router.post('/admin/tasks/reset-user', authenticateAdmin, async (req, res) => {
+  const { userId, phone } = req.body;
+  if (!userId && !phone) return res.status(400).json({ error: "User ID or phone is required." });
+
+  try {
+    let u;
+    if (userId) {
+      u = await db.get("SELECT id FROM users WHERE id = ?", [userId]);
+    } else if (phone) {
+      u = await db.get("SELECT id FROM users WHERE phone = ?", [phone]);
+    }
+
+    if (!u) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    await resetDailyTasksForUser(u.id);
+    res.json({ message: `Successfully reset daily tasks and limits to full capacity for user.` });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to reset user tasks: " + error.message });
+  }
+});
 // Toggle user freeze status via labour logs phone number
 router.post('/admin/labour-logs/toggle-freeze', authenticateAdmin, async (req, res) => {
   const { phone } = req.body;
