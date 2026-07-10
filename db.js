@@ -203,31 +203,47 @@ export async function initDatabase() {
     )
   `);
 
-  // Seed default packages/tiers (including legacy packages for test suite compatibility)
+  // Migrate packages table with new display columns
+  const addPkgColumn = async (columnDef) => {
+    try { await run(`ALTER TABLE packages ADD COLUMN ${columnDef}`); } catch (e) { /* column exists */ }
+  };
+  await addPkgColumn('total_return REAL DEFAULT 0.0');
+  await addPkgColumn('price_bdt REAL DEFAULT 0.0');
+  await addPkgColumn('daily_return_bdt REAL DEFAULT 0.0');
+  await addPkgColumn('graphic_type TEXT DEFAULT \'\'');
+  await addPkgColumn('description TEXT DEFAULT \'\'');
+
+  // Seed the 10 canonical investment tiers with precise spec values
   const defaultPkgs = [
-    { id: 'eco_mini', name: "Nexora Eco-Mini Grid", price: 10, daily_return: 0.35, lock_days: 180 },
-    { id: 'smart_home', name: "Nexora Smart Home Grid", price: 30, daily_return: 1.10, lock_days: 180 },
-    { id: 'solar_hub', name: "Nexora Solar Community Hub", price: 70, daily_return: 2.70, lock_days: 180 },
-    { id: 'agro_pump', name: "Nexora Agro-Solar Pump", price: 100, daily_return: 4.00, lock_days: 180 },
-    { id: 'wind_farm', name: "Nexora Wind Farm Asset", price: 300, daily_return: 13.00, lock_days: 180 },
-    { id: 'hydro_plant', name: "Nexora Industrial Hydro-Plant", price: 700, daily_return: 32.00, lock_days: 180 },
-    { id: 'biomass_plant', name: "Nexora Biomass Power Plant", price: 1000, daily_return: 48.00, lock_days: 180 },
-    { id: 'data_center', name: "Nexora Green Data Center", price: 5000, daily_return: 260.00, lock_days: 180 },
-    { id: 'gold_reserve', name: "Nexora Gold Refinery Reserve", price: 10000, daily_return: 550.00, lock_days: 180 },
-    { id: 'energy_matrix', name: "Nexora Sovereign Energy Matrix", price: 50000, daily_return: 3000.00, lock_days: 180 },
-    
-    // Legacy BDT/INR package configurations for automated test suite compatibility
-    { id: 'solar', name: "Solar Power Grid", price: 1000, daily_return: 30.00, lock_days: 180 },
-    { id: 'wind', name: "Wind Turbine Project", price: 5000, daily_return: 160.00, lock_days: 180 },
-    { id: 'biomass', name: "Biomass Energy Plant", price: 15000, daily_return: 510.00, lock_days: 180 },
-    { id: 'lithium', name: "Lithium Battery Refinery", price: 4000, daily_return: 144.00, lock_days: 180 },
-    { id: 'gold', name: "Gold Refining Facility", price: 100000, daily_return: 3800.00, lock_days: 180 }
+    { id: 'free_starter',  name: 'Free Starter Pack',           price: 0,      daily_return: 0,      total_return: 36.00,      price_bdt: 0,          daily_return_bdt: 0,      lock_days: 180, graphic_type: 'book',      description: 'Unlocked by default on new registration. Earn through active free tasks.' },
+    { id: 'eco_mini',     name: 'Eco-Mini Grid',                price: 10,     daily_return: 0.25,   total_return: 135.00,     price_bdt: 1200,       daily_return_bdt: 30,     lock_days: 180, graphic_type: 'solar',     description: 'Single residential solar cell module generating passive base-grid yields.' },
+    { id: 'smart_home',   name: 'Smart Home Grid',              price: 30,     daily_return: 0.75,   total_return: 270.00,     price_bdt: 3600,       daily_return_bdt: 90,     lock_days: 180, graphic_type: 'house',     description: 'Isometric smart house layout with wireless blue pulse ripple energy grid.' },
+    { id: 'solar_hub',    name: 'Solar Community Hub',          price: 70,     daily_return: 1.70,   total_return: 630.00,     price_bdt: 8400,       daily_return_bdt: 204,    lock_days: 180, graphic_type: 'community', description: 'Public interconnected micro-grid arrays powering community energy hubs.' },
+    { id: 'agro_pump',    name: 'Agro-Solar Pump',              price: 100,    daily_return: 2.50,   total_return: 900.00,     price_bdt: 12000,      daily_return_bdt: 300,    lock_days: 180, graphic_type: 'pump',      description: 'Automated water pump integrated with modular solar wings for agriculture.' },
+    { id: 'wind_farm',    name: 'Wind Farm Asset',              price: 300,    daily_return: 7.50,   total_return: 2700.00,    price_bdt: 36000,      daily_return_bdt: 900,    lock_days: 180, graphic_type: 'wind',      description: 'Modern high-poly rotating wind turbines generating clean offshore yields.' },
+    { id: 'hydro_plant',  name: 'Industrial Hydro-Plant',       price: 700,    daily_return: 17.50,  total_return: 6300.00,    price_bdt: 84000,      daily_return_bdt: 2100,   lock_days: 180, graphic_type: 'hydro',     description: 'Water dam mechanical terminal pulsating with neon blue energy vectors.' },
+    { id: 'biomass_plant',name: 'Biomass Power Plant',          price: 1000,   daily_return: 25.00,  total_return: 9900.00,    price_bdt: 120000,     daily_return_bdt: 3000,   lock_days: 180, graphic_type: 'biomass',   description: 'Bio-refinery silo recycling radiant fluid particles to generate power.' },
+    { id: 'data_center',  name: 'Green Data Center',            price: 5000,   daily_return: 125.00, total_return: 48600.00,   price_bdt: 600000,     daily_return_bdt: 15000,  lock_days: 180, graphic_type: 'server',    description: 'High-tech mainframe server chassis layered with bright cooling tubes.' },
+    { id: 'gold_reserve', name: 'Gold Refinery Reserve',        price: 10000,  daily_return: 250.00, total_return: 102600.00,  price_bdt: 1200000,    daily_return_bdt: 30000,  lock_days: 180, graphic_type: 'gold',      description: 'Highly glossed solid bullion gold bars arranged on a circuit refinery pattern.' },
+    // Legacy packages for automated test suite compatibility
+    { id: 'solar',    name: 'Solar Power Grid',          price: 1000,   daily_return: 30.00,  total_return: 5400,  price_bdt: 0, daily_return_bdt: 0, lock_days: 180, graphic_type: 'solar',  description: '' },
+    { id: 'wind',     name: 'Wind Turbine Project',      price: 5000,   daily_return: 160.00, total_return: 28800, price_bdt: 0, daily_return_bdt: 0, lock_days: 180, graphic_type: 'wind',   description: '' },
+    { id: 'biomass',  name: 'Biomass Energy Plant',      price: 15000,  daily_return: 510.00, total_return: 91800, price_bdt: 0, daily_return_bdt: 0, lock_days: 180, graphic_type: 'biomass',description: '' },
+    { id: 'lithium',  name: 'Lithium Battery Refinery',  price: 4000,   daily_return: 144.00, total_return: 25920, price_bdt: 0, daily_return_bdt: 0, lock_days: 180, graphic_type: 'server', description: '' },
+    { id: 'gold',     name: 'Gold Refining Facility',    price: 100000, daily_return: 3800.00,total_return: 684000,price_bdt: 0, daily_return_bdt: 0, lock_days: 180, graphic_type: 'gold',   description: '' }
   ];
 
   for (const pkg of defaultPkgs) {
-    await run("INSERT OR IGNORE INTO packages (id, name, price, daily_return, lock_days) VALUES (?, ?, ?, ?, ?)", [
-      pkg.id, pkg.name, pkg.price, pkg.daily_return, pkg.lock_days
-    ]);
+    await run(
+      `INSERT OR IGNORE INTO packages (id, name, price, daily_return, total_return, price_bdt, daily_return_bdt, lock_days, graphic_type, description)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [pkg.id, pkg.name, pkg.price, pkg.daily_return, pkg.total_return, pkg.price_bdt, pkg.daily_return_bdt, pkg.lock_days, pkg.graphic_type, pkg.description]
+    );
+    // Update existing rows with new data (in case they were already seeded with old values)
+    await run(
+      `UPDATE packages SET name=?, price=?, daily_return=?, total_return=?, price_bdt=?, daily_return_bdt=?, lock_days=?, graphic_type=?, description=? WHERE id=?`,
+      [pkg.name, pkg.price, pkg.daily_return, pkg.total_return, pkg.price_bdt, pkg.daily_return_bdt, pkg.lock_days, pkg.graphic_type, pkg.description, pkg.id]
+    );
   }
 
   // Seed default configuration settings if not present

@@ -304,6 +304,20 @@ const INVESTMENT_TIERS = {
   ]
 };
 
+// Public: Get All Investment Packages (with display columns)
+router.get('/invest/packages', async (req, res) => {
+  try {
+    // Return only the 10 canonical tiers (exclude legacy test-suite packages)
+    const pkgs = await db.all(
+      `SELECT * FROM packages WHERE id IN ('free_starter','eco_mini','smart_home','solar_hub','agro_pump','wind_farm','hydro_plant','biomass_plant','data_center','gold_reserve') ORDER BY price ASC`
+    );
+    res.json(pkgs);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load investment packages.' });
+  }
+});
+
+
 // Purchase Asset Unit (Deducts from deposit_balance)
 router.post('/invest/activate', authenticateToken, async (req, res) => {
   const { tierId } = req.body;
@@ -322,7 +336,17 @@ router.post('/invest/activate', authenticateToken, async (req, res) => {
       if (!user) throw new Error("User not found");
       if (user.status === 'frozen') throw new Error("Account frozen");
 
-      if (user.country_code === '+91') {
+      // Special handling for free tier (price = 0, no deduction needed)
+      if (selectedTier.price === 0) {
+        // Check if user already has a free_starter contract
+        const existingFree = await db.get(
+          "SELECT id FROM contracts WHERE user_id = ? AND tier_name = ? AND status = 'active'",
+          [userId, selectedTier.name]
+        );
+        if (existingFree) {
+          throw new Error("Free Starter Pack is already active on your account.");
+        }
+      } else if (user.country_code === '+91') {
         // Legacy India mode: verify and deduct from total_balance/balance
         const effectiveBal = Math.max(user.total_balance || 0, user.balance || 0);
         if (effectiveBal < selectedTier.price) {
@@ -335,13 +359,17 @@ router.post('/invest/activate', authenticateToken, async (req, res) => {
       } else {
         // Premium Mode: verify and deduct from deposit_balance only
         if (user.deposit_balance < selectedTier.price) {
-          throw new Error(`Insufficient Deposit Balance. Please deposit at least $${selectedTier.price} first.`);
+          throw new Error(`Insufficient Deposit Balance. Please recharge.`);
         }
         await db.run("UPDATE users SET deposit_balance = deposit_balance - ? WHERE id = ?", [selectedTier.price, userId]);
       }
 
-      // 3. Create active contract
-      const dailyRoi = selectedTier.daily_return / selectedTier.price;
+      // 3. Create active contract with maturity date
+      const dailyRoi = selectedTier.price > 0 ? (selectedTier.daily_return / selectedTier.price) : 0;
+      const now = new Date();
+      const maturityDate = new Date(now);
+      maturityDate.setDate(maturityDate.getDate() + selectedTier.lock_days);
+
       const contractResult = await db.run(
         `INSERT INTO contracts (user_id, tier_name, price, daily_roi, duration_days, last_claimed_at) 
          VALUES (?, ?, ?, ?, ?, NULL)`,
@@ -349,57 +377,70 @@ router.post('/invest/activate', authenticateToken, async (req, res) => {
       );
       const contractId = contractResult.id;
 
-      // 3-Tier referral commission engine (credits uplines' level pending slots or available balances on downline lease activation)
-      let currentUplineId = user.referred_by;
-      const commissionRates = [0.10, 0.04, 0.01]; // Level 1 (10%), Level 2 (4%), Level 3 (1%)
+      // 3-Tier referral commission engine (only for paid tiers)
+      if (selectedTier.price > 0) {
+        let currentUplineId = user.referred_by;
+        const commissionRates = [0.10, 0.04, 0.01]; // Level 1 (10%), Level 2 (4%), Level 3 (1%)
 
-      for (let level = 1; level <= 3; level++) {
-        if (!currentUplineId) break;
+        for (let level = 1; level <= 3; level++) {
+          if (!currentUplineId) break;
 
-        const upline = await db.get("SELECT id, country_code, referred_by FROM users WHERE id = ?", [currentUplineId]);
-        if (!upline) break;
+          const upline = await db.get("SELECT id, country_code, referred_by FROM users WHERE id = ?", [currentUplineId]);
+          if (!upline) break;
 
-        let commAmount = selectedTier.price * commissionRates[level - 1];
-        commAmount = Math.round(commAmount * 100) / 100;
+          let commAmount = selectedTier.price * commissionRates[level - 1];
+          commAmount = Math.round(commAmount * 100) / 100;
 
-        if (upline.country_code === '+91') {
-          // Legacy India mode: credit instantly to available balance
-          await db.run(
-            `UPDATE users SET total_balance = total_balance + ?, balance = balance + ? WHERE id = ?`,
-            [commAmount, commAmount, upline.id]
-          );
+          if (upline.country_code === '+91') {
+            await db.run(
+              `UPDATE users SET total_balance = total_balance + ?, balance = balance + ? WHERE id = ?`,
+              [commAmount, commAmount, upline.id]
+            );
+            await db.run(
+              `INSERT INTO transactions (user_id, type, amount, currency, status, details) 
+               VALUES (?, 'referral_comm', ?, 'USD', 'approved', ?)`,
+              [upline.id, commAmount, `Instant Level ${level} Commission from lease purchase of user ID ${userId}`]
+            );
+          } else {
+            const col = `level${level}_pending_comm`;
+            await db.run(`UPDATE users SET ${col} = ${col} + ? WHERE id = ?`, [commAmount, upline.id]);
+            await db.run(
+              `INSERT INTO transactions (user_id, type, amount, currency, status, details) 
+               VALUES (?, 'referral_comm_pending', ?, 'USD', 'approved', ?)`,
+              [upline.id, commAmount, `Pending Level ${level} Commission from lease purchase of user ID ${userId}`]
+            );
+          }
 
-          // Record instant commission log entry
-          await db.run(
-            `INSERT INTO transactions (user_id, type, amount, currency, status, details) 
-             VALUES (?, 'referral_comm', ?, 'USD', 'approved', ?)`,
-            [upline.id, commAmount, `Instant Level ${level} Commission from lease purchase of user ID ${userId}`]
-          );
-        } else {
-          // Premium Mode: credit level pending commission field
-          const col = `level${level}_pending_comm`;
-          await db.run(`UPDATE users SET ${col} = ${col} + ? WHERE id = ?`, [commAmount, upline.id]);
-
-          // Record pending commission log entry
-          await db.run(
-            `INSERT INTO transactions (user_id, type, amount, currency, status, details) 
-             VALUES (?, 'referral_comm_pending', ?, 'USD', 'approved', ?)`,
-            [upline.id, commAmount, `Pending Level ${level} Commission from lease purchase of user ID ${userId}`]
-          );
+          currentUplineId = upline.referred_by;
         }
-
-        // Advance to next upline level
-        currentUplineId = upline.referred_by;
       }
 
-      // 4. Record contract purchase transaction
+      // 4. Record contract purchase transaction (skip for free tier)
+      if (selectedTier.price > 0) {
+        await db.run(
+          `INSERT INTO transactions (user_id, type, amount, currency, status, details) 
+           VALUES (?, 'activate_contract', ?, 'USD', 'approved', ?)`,
+          [userId, selectedTier.price, `Activated ${selectedTier.name} (180-day Lease)`]
+        );
+      }
+
+      // 5. Task Unlock Hook — update user's task tier access by resetting tier restrictions
+      // Determine tier level from package id mapping
+      const tierLevelMap = {
+        'free_starter': 0, 'eco_mini': 1, 'smart_home': 2, 'solar_hub': 3,
+        'agro_pump': 4, 'wind_farm': 5, 'hydro_plant': 6, 'biomass_plant': 7,
+        'data_center': 8, 'gold_reserve': 9
+      };
+      const newTierLevel = tierLevelMap[tierId] !== undefined ? tierLevelMap[tierId] : 0;
+
+      // Record task unlock event in labour_logs for tracking
       await db.run(
-        `INSERT INTO transactions (user_id, type, amount, currency, status, details) 
-         VALUES (?, 'activate_contract', ?, 'USD', 'approved', ?)`,
-        [userId, selectedTier.price, `Activated ${selectedTier.name} (180-day Lease)`]
+        `INSERT INTO labour_logs (phone, tier_name, task_instance, status, timestamp)
+         VALUES (?, ?, ?, 'In-Progress / Unchecked', ?)`,
+        [user.phone, `Tier ${newTierLevel}: ${selectedTier.name}`, 'Task #1 of 5', new Date().toISOString()]
       );
 
-      return { contractId, price: selectedTier.price, tierName: selectedTier.name };
+      return { contractId, price: selectedTier.price, tierName: selectedTier.name, maturityDate: maturityDate.toISOString() };
     });
 
     res.json({
@@ -411,6 +452,7 @@ router.post('/invest/activate', authenticateToken, async (req, res) => {
     res.status(400).json({ error: error.message || "Activation failed." });
   }
 });
+
 
 // Get User's Contracts
 router.get('/invest/contracts', authenticateToken, async (req, res) => {
@@ -1478,6 +1520,127 @@ router.post('/admin/labour-logs/toggle-freeze', authenticateAdmin, async (req, r
     res.json({ message: `User status changed to ${nextStatus}.`, status: nextStatus });
   } catch (error) {
     res.status(500).json({ error: "Failed to toggle user freeze status: " + error.message });
+  }
+});
+
+// -------------------------------------------------------------
+// ADMIN: ACTIVE INVESTMENT LEDGER
+// -------------------------------------------------------------
+
+// Get all user investment contracts with maturity dates (admin)
+router.get('/admin/investments', authenticateAdmin, async (req, res) => {
+  try {
+    const investments = await db.all(`
+      SELECT 
+        c.id,
+        c.user_id,
+        u.phone,
+        c.tier_name,
+        c.price,
+        c.daily_roi,
+        c.duration_days,
+        c.days_elapsed,
+        c.total_returned,
+        c.status,
+        c.created_at,
+        date(c.created_at, '+180 days') AS maturity_date
+      FROM contracts c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.user_id != 9999
+      ORDER BY c.id DESC
+      LIMIT 200
+    `);
+    res.json(investments);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load investment ledger.' });
+  }
+});
+
+// Force terminate (shutdown) a specific investment contract
+router.post('/admin/investments/terminate', authenticateAdmin, async (req, res) => {
+  const { contractId } = req.body;
+  if (!contractId) return res.status(400).json({ error: 'Contract ID is required.' });
+
+  try {
+    await db.runTransaction(async () => {
+      const contract = await db.get('SELECT * FROM contracts WHERE id = ?', [contractId]);
+      if (!contract) throw new Error('Contract not found.');
+      if (contract.status === 'terminated') throw new Error('Contract is already terminated.');
+
+      // Mark contract as terminated
+      await db.run("UPDATE contracts SET status = 'terminated' WHERE id = ?", [contractId]);
+
+      // Log admin termination action
+      await db.run(
+        `INSERT INTO transactions (user_id, type, amount, currency, status, details)
+         VALUES (?, 'admin_terminate', ?, 'USD', 'approved', ?)`,
+        [contract.user_id, contract.price, `Admin Force Terminated Contract #${contractId} (${contract.tier_name})`]
+      );
+    });
+
+    res.json({ message: `Contract #${contractId} has been force terminated.` });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// -------------------------------------------------------------
+// ADMIN: PRODUCT CONFIGURATOR (Package CRUD)
+// -------------------------------------------------------------
+
+// Get all packages (admin — includes legacy)
+router.get('/admin/packages', authenticateAdmin, async (req, res) => {
+  try {
+    const packages = await db.all('SELECT * FROM packages ORDER BY price ASC');
+    res.json(packages);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load packages.' });
+  }
+});
+
+// Create or update a package
+router.post('/admin/packages/save', authenticateAdmin, async (req, res) => {
+  const { id, name, price, daily_return, total_return, price_bdt, daily_return_bdt, lock_days, graphic_type, description } = req.body;
+
+  if (!id || !name || price === undefined || daily_return === undefined) {
+    return res.status(400).json({ error: 'Package ID, name, price, and daily_return are required.' });
+  }
+
+  try {
+    const existing = await db.get('SELECT id FROM packages WHERE id = ?', [id]);
+    if (existing) {
+      await db.run(
+        `UPDATE packages SET name=?, price=?, daily_return=?, total_return=?, price_bdt=?, daily_return_bdt=?, lock_days=?, graphic_type=?, description=? WHERE id=?`,
+        [name, parseFloat(price), parseFloat(daily_return), parseFloat(total_return || 0), parseFloat(price_bdt || 0),
+         parseFloat(daily_return_bdt || 0), parseInt(lock_days || 180), graphic_type || '', description || '', id]
+      );
+      res.json({ message: 'Package updated successfully.' });
+    } else {
+      await db.run(
+        `INSERT INTO packages (id, name, price, daily_return, total_return, price_bdt, daily_return_bdt, lock_days, graphic_type, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, name, parseFloat(price), parseFloat(daily_return), parseFloat(total_return || 0), parseFloat(price_bdt || 0),
+         parseFloat(daily_return_bdt || 0), parseInt(lock_days || 180), graphic_type || '', description || '']
+      );
+      res.json({ message: 'Package created successfully.' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save package: ' + error.message });
+  }
+});
+
+// Delete a package
+router.delete('/admin/packages/delete/:id', authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  // Protect canonical tiers from deletion
+  const protectedIds = ['free_starter','eco_mini','smart_home','solar_hub','agro_pump','wind_farm','hydro_plant','biomass_plant','data_center','gold_reserve'];
+  if (protectedIds.includes(id)) {
+    return res.status(400).json({ error: 'Cannot delete a canonical investment tier. Edit it instead.' });
+  }
+  try {
+    await db.run('DELETE FROM packages WHERE id = ?', [id]);
+    res.json({ message: 'Package deleted successfully.' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete package.' });
   }
 });
 
